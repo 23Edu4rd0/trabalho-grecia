@@ -66,7 +66,7 @@
     return score;
   }
 
-  function answer(question) {
+  function localAnswer(question) {
     const qTokens = tokenize(question);
     if (!qTokens.length || !KB.length) {
       return {
@@ -93,6 +93,31 @@
     };
   }
 
+  // Tenta responder com o Gemini (via função serverless em /api/chat, que
+  // guarda a chave no servidor). Se a rota não existir (ex.: site hospedado
+  // em GitHub Pages puro, sem backend), cai automaticamente na busca local.
+  let backendAvailable = true;
+  async function askBackend(question, history) {
+    if (!backendAvailable) return null;
+    try {
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ question, history }),
+      });
+      if (res.status === 404) {
+        backendAvailable = false; // sem função serverless disponível
+        return null;
+      }
+      if (!res.ok) return null;
+      const data = await res.json();
+      if (!data || !data.text) return null;
+      return { text: data.text, sources: [], model: data.model || "Gemini" };
+    } catch {
+      return null;
+    }
+  }
+
   // ---- UI wiring ----
   function el(tag, cls, html) {
     const e = document.createElement(tag);
@@ -101,10 +126,13 @@
     return e;
   }
 
-  function addMessage(container, role, text, sources) {
+  function addMessage(container, role, text, sources, engine) {
     const msg = el("div", "msg " + role, text.replace(/\n/g, "<br><br>"));
     if (sources && sources.length) {
       const src = el("span", "src", "📖 Fonte: " + sources.join(" · "));
+      msg.appendChild(src);
+    } else if (role === "bot" && engine) {
+      const src = el("span", "src", engine === "local" ? "🔎 Busca local no trabalho" : "✨ Gemini");
       msg.appendChild(src);
     }
     container.appendChild(msg);
@@ -126,7 +154,7 @@
         <span class="dot"></span>
         <div>
           <strong>Agente da Companhia</strong>
-          <span class="sub">Responde com base no trabalho teórico e nos slides</span>
+          <span class="sub">Gemini + contexto do trabalho (com busca local como reserva)</span>
         </div>
         <button class="close" aria-label="Fechar">✕</button>
       </div>
@@ -166,6 +194,7 @@
     });
 
     let greeted = false;
+    const chatHistory = [];
     toggle.addEventListener("click", () => {
       panel.hidden = !panel.hidden;
       if (!panel.hidden && !greeted) {
@@ -173,26 +202,33 @@
         addMessage(
           messages,
           "bot",
-          "Salve! 🎭 Sou o agente de IA da Companhia das Máscaras Gregas. Posso responder perguntas sobre o nascimento do teatro grego, Dionísio, as máscaras, a tragédia, a comédia, os dramaturgos, a arquitetura do teatro e sua influência até hoje — tudo com base no trabalho teórico e na apresentação da equipe. O que você quer saber?"
+          "Salve! 🎭 Sou o agente de IA da Companhia das Máscaras Gregas, com o Gemini como cérebro (quando disponível) e o material da equipe como contexto. Posso responder perguntas sobre o nascimento do teatro grego, Dionísio, as máscaras, a tragédia, a comédia, os dramaturgos, a arquitetura do teatro e sua influência até hoje. O que você quer saber?"
         );
       }
       if (!panel.hidden) input.focus();
     });
     closeBtn.addEventListener("click", () => (panel.hidden = true));
 
-    function handleAsk() {
+    async function handleAsk() {
       const q = input.value.trim();
       if (!q) return;
       addMessage(messages, "user", q);
       input.value = "";
-      const thinking = el("div", "msg bot", "Consultando a base de conhecimento…");
+      sendBtn.disabled = true;
+      const thinking = el("div", "msg bot", "Pensando…");
       messages.appendChild(thinking);
       messages.scrollTop = messages.scrollHeight;
-      setTimeout(() => {
-        thinking.remove();
-        const { text, sources } = answer(q);
-        addMessage(messages, "bot", text, sources);
-      }, 350);
+
+      const remote = await askBackend(q, chatHistory);
+      thinking.remove();
+      if (remote) {
+        addMessage(messages, "bot", remote.text, remote.sources, "gemini");
+        chatHistory.push({ role: "user", text: q }, { role: "model", text: remote.text });
+      } else {
+        const local = localAnswer(q);
+        addMessage(messages, "bot", local.text, local.sources, "local");
+      }
+      sendBtn.disabled = false;
     }
 
     sendBtn.addEventListener("click", handleAsk);
